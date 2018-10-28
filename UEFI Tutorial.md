@@ -150,15 +150,17 @@ build 是一个程序,用来自动化编译模块
 
 成功则生成*.efi文件,所有生成的*.efi文件都会在edk2/build下的相应目录
 
-如:
+如:Hello.efi文件位于Build/AppPkg/RELEASE_GCC5/X64/AppPkg/Applications/Hello/Hello/OUTPUT目录下
 
-​	![1540294441449](/home/ai/.config/Typora/typora-user-images/1540294441449.png)
+​	![1540740380160](/home/ai/.config/Typora/typora-user-images/1540740380160.png)
+
+2\在固件中运行
 
 
 
 
 
-### UEFI中的Protocol
+### 二、UEFI中的Protocol
 
 
 
@@ -174,15 +176,190 @@ build 是一个程序,用来自动化编译模块
 
 
 
-例子:
+例子: 读取设备路径
 
-​	
+```C
+#include <Base.h>
+#include <Library/BaseLib.h>
+#include <Library/BaseMemoryLib.h>
+#include <Library/DevicePathLib.h>
+#include <Library/PrintLib.h>
+#include <Library/UefiBootServicesTableLib.h>
+#include <Library/UefiLib.h>
+#include <Protocol/BlockIo.h>
+#include <Protocol/DevicePath.h>
+#include <Protocol/DevicePathToText.h>
+#include <Protocol/DiskIo.h>
+#include <Uefi.h>
+#include <Uefi/UefiGpt.h>
+
+EFI_STATUS
+EFIAPI
+ReadDevicePath(IN EFI_HANDLE ImageHandle, IN EFI_SYSTEM_TABLE *SystemTable) {
+  EFI_STATUS Status;
+  UINTN HandleIndex, HandleCount;
+  EFI_HANDLE *DiskControllerHandles = NULL;
+  EFI_DISK_IO_PROTOCOL *DiskIo;
+
+  /*
+  gBS->LocateHandleBuffer()
+  gBS是启动服务的一个指针,几乎提供的所有启动服务都需要使用这个指针
+  LocateHandleBuffer()这个函数的目的是为了找到提供协议提供某个协议的所有设备,在这里就是找提供磁盘IO的所有设备.这个函数是用来找到支持某协议的所有设备,如果想要使用某设备所提供的该协议需要在后续的操作中需要遍历一遍看看.
+  */
+  Status = gBS->LocateHandleBuffer(ByProtocol, &gEfiDiskIoProtocolGuid, NULL,
+                                   &HandleCount, &DiskControllerHandles);
+
+  if (!EFI_ERROR(Status)) {
+    CHAR8 gptHeaderBuf[512];
+
+    EFI_PARTITION_TABLE_HEADER *gptHeader =
+        (EFI_PARTITION_TABLE_HEADER *)gptHeaderBuf;
+
+    for (HandleIndex = 0; HandleIndex < HandleCount; HandleIndex++) {
+      /*open EFI_DISK_IO_PROTOCOL  */
+      /*
+      上面LocateHandleBuffer()已经找到了支持磁盘IO的所有设备,现在来遍历一遍
+      HandleProtocol()函数是用来打开指定设备的某个协议,在这里用来打开磁盘的磁盘IO协议
+      */
+      Status = gBS->HandleProtocol(DiskControllerHandles[HandleIndex],
+                                   &gEfiDiskIoProtocolGuid, (VOID **)&DiskIo);
+
+      if (!EFI_ERROR(Status)) {
+        {
+          EFI_DEVICE_PATH_PROTOCOL *DiskDevicePath;
+          EFI_DEVICE_PATH_TO_TEXT_PROTOCOL *Device2TextProtocol = 0;
+          CHAR16 *TextDevicePath = 0;
+          /*1.open EFI_DEVICE_PATH_PROTOCOL  */
+          // Status = gBS->OpenProtocol(DiskControllerHandles[HandleIndex],
+          //                            &gEfiDevicePathProtocolGuid,
+          //                            (VOID **)&DiskDevicePath, ImageHandle,
+          //                            NULL, EFI_OPEN_PROTOCOL_GET_PROTOCOL);
+          /*
+          这里的HandleProtocol()用来打开设备的设备路径协议
+          */
+          Status = gBS->HandleProtocol(DiskControllerHandles[HandleIndex],
+                                       &gEfiDevicePathProtocolGuid,
+                                       (VOID **)&DiskDevicePath);
+          if (!EFI_ERROR(Status)) {
+            if (Device2TextProtocol == 0)
+              /*
+               *这里的LocateProtocol()用来找到提供支持DevicePathToText协议的第一个实例
+               */
+              Status = gBS->LocateProtocol(&gEfiDevicePathToTextProtocolGuid,
+                                           NULL, (VOID **)&Device2TextProtocol);
+            /*2.use EFI_DEVICE_PATH_PROTOCOL 得到文本格式的 Device Path  */
+            TextDevicePath = Device2TextProtocol->ConvertDevicePathToText(
+                DiskDevicePath, TRUE, TRUE);
+            Print(L"%s\n", TextDevicePath);
+            if (TextDevicePath) gBS->FreePool(TextDevicePath);
+            /*3. close EFI_DEVICE_PATH_PROTOCO */
+            Status = gBS->CloseProtocol(DiskControllerHandles[HandleIndex],
+                                        &gEfiDevicePathProtocolGuid,
+                                        ImageHandle, NULL);
+          }
+        }
+        {
+          /*	*/
+          EFI_BLOCK_IO_PROTOCOL *BlockIo =
+              *(EFI_BLOCK_IO_PROTOCOL **)(DiskIo + 1);
+
+          EFI_BLOCK_IO_MEDIA *Media = BlockIo->Media;
+
+          /*read 1 part*/
+          Status =
+              DiskIo->ReadDisk(DiskIo, Media->MediaId, 512, 512, gptHeader);
+
+          /*charck GPT mark*/
+          if ((!EFI_ERROR(Status)) &&
+              (gptHeader->Header.Signature == 0x5452415020494645)) {
+            UINT32 CRCsum;
+            UINT32 GPTHeaderCRCsum = (gptHeader->Header.CRC32);
+            gptHeader->Header.CRC32 = 0;
+            gBS->CalculateCrc32(gptHeader, (gptHeader->Header.HeaderSize),
+                                &CRCsum);
+            if (GPTHeaderCRCsum == CRCsum) {
+              // find out GPT Header
+            }
+          }
+        }
+      }
+    }
+    gBS->FreePool(DiskControllerHandles);
+  }
+  return 0;
+}
+```
+
+
+
+| OpenProtocol            | 打开Protocol                                                 |
+| ----------------------- | :----------------------------------------------------------- |
+| HandleProtocol          | 打开Protocol, OpenProtocol的简化版                           |
+| LocateProtocol          | 找出系统中指定Protocol的第一个实例                           |
+| LocateHandleBuffer      | 找出支持指定Protocol的所有Handle,系统负责分配内存,调用者负责释放内存 |
+| LocateHandle            | 找出支持指定Protocol的所有Handle,调用者负责分配和释放内存    |
+| OpenProtocolInformation | 返回指定Protocol的打开信息                                   |
+| ProtocolsPerHandle      | 找出指定Handle上安装的所有Protocol                           |
+| CloseProtocol           | 关闭Protocol                                                 |
+
+以上读取设备分区表的代码已经写好,还得给这个源码写一个类似Makefile的文件,以便好编译和使用.文件要.inf结尾.
+
+```makefile
+[Defines]
+  INF_VERSION                    = 0x00010006
+  BASE_NAME                      = ReadDevicePath 
+  FILE_GUID                      = 4ea97c46-7491-4dfd-b442-747010f3ce5f
+  MODULE_TYPE                    = UEFI_APPLICATION
+  VERSION_STRING                 = 0.1
+  ENTRY_POINT                    = ReadDevicePath 
+[Sources]#标明源文件
+  ReadDevicePath.c
+
+[Packages]
+  MdePkg/MdePkg.dec
+[Protocols]#用协议的GUID标明源文件用到哪些协议
+  gEfiDiskIoProtocolGuid
+  gEfiBlockIoProtocolGuid
+  gEfiDevicePathProtocolGuid
+  gEfiDevicePathToTextProtocolGuid
+  gEfiSimpleFileSystemProtocolGuid
+  gEfiFirmwareVolume2ProtocolGuid
+
+[LibraryClasses]   
+  UefiApplicationEntryPoint
+  UefiLib
+
+```
+
+以上两个文件为一个模块,放在同一个目录下.如:
+
+![1540743273490](/home/ai/.config/Typora/typora-user-images/1540743273490.png)
 
 
 
 
 
+然后编译这个模块.最后生成.efi可执行文件,这个文件只能在UEFI环境下执行,在操作系统上是执行不了的.切记.
 
+在编译前需要把该模块的配置文件,也就是.inf文件的文件路径放入你想放在某个包下面,也就是目录名是*Pkg特征的(一般是这样).dsc文件里面的components标记后.如:我放在AppPkg/AppPkg.dsc里面
+
+![1540743639258](/home/ai/.config/Typora/typora-user-images/1540743639258.png)
+
+在我这儿编译命令为:
+
+```bash
+ai@local:~/Documents/edk2$ build -p AppPkg/AppPkg.dsc -m lab/ReadDevicePath/ReadDevicePath.inf -a X64 -t GCC5 -b RELEASE
+#-m 表示模块
+#-a 表示arch
+#-t 表示编译器
+#-b 表示生成的版本
+```
+
+编译成功会会在build目录下的相应目录下能够找到生成的ReadDevicePath.efi文件
+
+
+
+执行:
 
 
 
